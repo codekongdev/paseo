@@ -347,6 +347,32 @@ describe("CursorACPAgentClient session start", () => {
     await vi.waitFor(() => expect(session.getPendingPermissions()).toHaveLength(1));
   });
 
+  test("a rejected options update leaves permission handling as it was", async () => {
+    const session = createCursorSession(
+      { model: "composer-2.5" },
+      {
+        currentModelId: "composer-2.5",
+        configOptions: [fastConfigOption("false")],
+        setSessionConfigOption: vi.fn(async () => ({ configOptions: [fastConfigOption("false")] })),
+      },
+    );
+    await session.initializeNewSession();
+
+    await expect(
+      session.applyOptions({
+        auto_accept: true,
+        [CURSOR_FAST_FEATURE_OPTION.id]: "no-such-choice",
+      }),
+    ).rejects.toThrow();
+
+    void session.requestPermission({
+      sessionId: "session-1",
+      toolCall: { toolCallId: "tool-1", title: "Run command", kind: "execute", status: "pending" },
+      options: [{ optionId: "allow-always", name: "Always allow", kind: "allow_always" }],
+    });
+    await vi.waitFor(() => expect(session.getPendingPermissions()).toHaveLength(1));
+  });
+
   test("removing the Fast option returns the session to the value it started with", async () => {
     const setSessionConfigOption = vi.fn(async (request: { value: string }) => ({
       configOptions: [fastConfigOption(request.value === "true" ? "true" : "false")],

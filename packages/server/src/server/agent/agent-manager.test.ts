@@ -12951,4 +12951,91 @@ describe("agent options", () => {
       plan_mode: false,
     });
   });
+
+  test("overlapping patches to different keys both reach the provider and the stored record", async () => {
+    let release: () => void = () => {};
+    const firstApplyHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    class HeldSession extends OptionsSession {
+      override async applyOptions(options: ProviderOptions): Promise<void> {
+        const first = this.applied.length === 0;
+        this.applied.push(options);
+        if (first) await firstApplyHeld;
+      }
+    }
+    class HeldClient extends OptionsClient {
+      override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+        const session = new HeldSession(config);
+        this.session = session;
+        return session;
+      }
+    }
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-options-overlap-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const client = new HeldClient();
+    const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+    const created = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+
+    const speed = manager.setAgentOptions(created.id, { service_tier: "fast" });
+    const plan = manager.setAgentOptions(created.id, { plan_mode: true });
+    release();
+    await Promise.all([speed, plan]);
+
+    expect(client.session?.applied.at(-1)).toEqual({ service_tier: "fast", plan_mode: true });
+    expect(manager.getAgent(created.id)?.config.providerOptions).toEqual({
+      service_tier: "fast",
+      plan_mode: true,
+    });
+    await manager.flush();
+    expect((await storage.get(created.id))?.config?.providerOptions).toEqual({
+      service_tier: "fast",
+      plan_mode: true,
+    });
+  });
+
+  test("a metadata-only update of a stored agent reports its saved options and config defaults", async () => {
+    class PlanSession extends OptionsSession {
+      get controls(): AgentOptionControl[] {
+        return [createControl({ key: "plan_mode", label: "Plan" })];
+      }
+    }
+    class PlanClient extends OptionsClient {
+      override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+        return new PlanSession(config);
+      }
+    }
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-options-stored-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const manager = new AgentManager({
+      clients: { codex: new PlanClient() },
+      registry: storage,
+      logger,
+    });
+    const created = await manager.createAgent(
+      { provider: "codex", cwd: workdir, providerOptions: { plan_mode: true } },
+      undefined,
+      { workspaceId: "workspace-1" },
+    );
+    await manager.closeAgent(created.id);
+
+    const updates: ManagedAgent[] = [];
+    manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === created.id)
+          updates.push(event.agent);
+      },
+      { replayState: false },
+    );
+    await manager.markAgentUnread(created.id);
+
+    expect(updates).toHaveLength(1);
+    const payload = toAgentPayload(updates[0]!);
+    expect(payload.options).toEqual({ service_tier: "default", plan_mode: true });
+    expect(payload.features?.find((feature) => feature.id === "plan_mode")).toMatchObject({
+      value: true,
+    });
+  });
 });

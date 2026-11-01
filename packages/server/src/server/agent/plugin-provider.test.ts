@@ -17,7 +17,7 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { describe, expect, test } from "vitest";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import type { AgentClient, AgentStreamEvent } from "./agent-sdk-types.js";
-import { toStoredAgentRecord } from "./agent-projections.js";
+import { toAgentPayload, toStoredAgentRecord } from "./agent-projections.js";
 import { AgentManager } from "./agent-manager.js";
 import { buildProviderRegistry } from "./provider-registry.js";
 import { ProviderOverrideSchema } from "@getpaseo/protocol/provider-config";
@@ -1484,6 +1484,63 @@ describe("PluginAgentClientRegistry", () => {
       expect(isStaleProviderSessionError(failure)).toBe(true);
       expect(isStaleProviderSessionError(new Error("Provider connection is closed"))).toBe(false);
       expect(isStaleProviderSessionError(new Error("boom"))).toBe(false);
+    } finally {
+      await registry.shutdown();
+    }
+  });
+
+  test("a setting the plugin changes on its own replaces an option the user had selected", async () => {
+    const harness = createProviderHarness();
+    const logger = createTestLogger();
+    const registry = new PluginAgentClientRegistry(logger);
+    registry.replace([harness.registration]);
+    const manager = new AgentManager({
+      logger,
+      clients: registry.clients(),
+      providerDefinitions: registry.definitions(),
+    });
+    try {
+      const agent = await manager.createAgent(
+        { provider: harness.registration.id, cwd: tmpdir(), providerOptions: { voice: "direct" } },
+        undefined,
+        { workspaceId: undefined },
+      );
+      const opened = harness.inputs.find((input) => input.type === "session.open");
+      if (opened?.type !== "session.open") throw new Error("session was not opened");
+
+      // The plugin reports a new voice after, say, a mode change.
+      harness.emit({
+        type: "session.config",
+        sessionId: opened.sessionId,
+        config: {
+          model: "plugin-model",
+          mode: "build",
+          models: [{ id: "plugin-model", label: "Plugin model" }],
+          modes: [{ id: "build", label: "Build" }],
+          thinkingOptions: [],
+          settings: [
+            {
+              type: "select",
+              id: "voice",
+              label: "Voice",
+              value: "soft",
+              options: [
+                { label: "Direct", value: "direct" },
+                { label: "Soft", value: "soft" },
+              ],
+            },
+          ],
+        },
+      });
+
+      await expect
+        .poll(() => manager.getAgent(agent.id)?.config.providerOptions)
+        .toEqual({ voice: "soft" });
+      const payload = toAgentPayload(manager.getAgent(agent.id)!);
+      expect(payload.options).toEqual({ voice: "soft" });
+      expect(payload.features?.find((feature) => feature.id === "voice")).toMatchObject({
+        value: "soft",
+      });
     } finally {
       await registry.shutdown();
     }

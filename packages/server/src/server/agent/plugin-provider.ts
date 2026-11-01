@@ -16,6 +16,7 @@ import {
   type ProviderCapability,
   type ProviderConfigChanges,
   type ProviderConfigState,
+  type ProviderSetting,
   type ProviderConnection,
   type ProviderError,
   type ProviderEvent,
@@ -1211,6 +1212,8 @@ class PluginAgentSession implements AgentSession {
     closed: boolean;
   } | null = null;
   private replaying: Promise<void> | null = null;
+  /** The setting values the session last reported, to tell which ones a config event changed. */
+  private reportedSettings = new Map<string, JsonValue>();
 
   constructor(
     readonly provider: string,
@@ -1223,6 +1226,7 @@ class PluginAgentSession implements AgentSession {
     private readonly onBind: (bridge: ProviderRuntimeSession) => void,
   ) {
     this.subagentIdsBySession.set(bridge.id, null);
+    this.reportedSettings = settingValues(bridge.config.settings);
     for (const event of bridge.history) this.accept(event, false);
     // Opening notices arrive before the manager subscribes to the session.
     // Commit them on registration and replay the same timestamps from history.
@@ -1509,6 +1513,21 @@ class PluginAgentSession implements AgentSession {
       this.history.push(next);
       if (live) this.emit(next);
     }
+    if (event.type !== "session.config") return;
+    // A setting the plugin changed on its own is an option change, so the stored option
+    // follows what the plugin reports.
+    const patch = this.changedSettings(event.config.settings);
+    if (live && patch) this.emit({ type: "options_changed", provider: this.provider, patch });
+  }
+
+  private changedSettings(settings: readonly ProviderSetting[]): Record<string, JsonValue> | null {
+    const next = settingValues(settings);
+    const changed: Record<string, JsonValue> = {};
+    for (const [id, value] of next) {
+      if (this.reportedSettings.get(id) !== value) changed[id] = value;
+    }
+    this.reportedSettings = next;
+    return Object.keys(changed).length > 0 ? changed : null;
   }
 
   private translate(event: ProviderEvent): AgentStreamEvent[] {
@@ -1775,6 +1794,7 @@ class PluginAgentSession implements AgentSession {
     const bridge = await this.reopen(replay.persistence, replay.config);
     this.bridge = bridge;
     this.subagentIdsBySession.set(bridge.id, null);
+    this.reportedSettings = settingValues(bridge.config.settings);
     for (const event of bridge.history) this.accept(event, false);
     this.unsubscribe = bridge.onEvent((event) => this.accept(event, true));
     this.onBind(bridge);
@@ -2016,6 +2036,10 @@ function toJsonObject(value: unknown, label: string): Record<string, JsonValue> 
     throw new Error(`${label} must be a JSON object`);
   }
   return encoded as Record<string, JsonValue>;
+}
+
+function settingValues(settings: readonly ProviderSetting[]): Map<string, JsonValue> {
+  return new Map(settings.map((setting) => [setting.id, setting.value]));
 }
 
 function toJsonValue(value: unknown, label: string): JsonValue {

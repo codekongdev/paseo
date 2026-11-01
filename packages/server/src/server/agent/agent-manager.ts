@@ -2174,6 +2174,10 @@ export class AgentManager {
         updatedAt,
         availableModes: [],
         controls: record.controls,
+        effectiveOptions: this.effectiveOptionsFor(
+          record.provider,
+          record.config?.providerOptions ?? undefined,
+        ),
         currentModeId: record.lastModeId ?? null,
         pendingPermissions: new Map(),
         bufferedPermissionResolutions: new Map(),
@@ -2272,16 +2276,33 @@ export class AgentManager {
    * value leaves the stored options unchanged.
    */
   async setAgentOptions(agentId: string, patch: ProviderOptionsPatch): Promise<void> {
-    const agent = this.requireAgent(agentId);
-    const ownOptions = applyProviderOptionsPatch(agent.config.providerOptions, patch);
+    // One patch at a time per agent: each derives its options from the committed record, so
+    // overlapping patches to different keys would otherwise overwrite one another.
+    await this.runLifecycleMutation(agentId, async () => {
+      const agent = this.requireAgent(agentId);
+      const previous = agent.config.providerOptions;
+      const ownOptions = applyProviderOptionsPatch(previous, patch);
+      const commit = (options: ProviderOptions) => {
+        agent.config.providerOptions = Object.keys(options).length > 0 ? options : undefined;
+      };
 
-    if (agent.session.applyOptions) {
-      await agent.session.applyOptions(this.effectiveOptionsFor(agent.provider, ownOptions));
-      await this.drainSessionEvents(agentId);
-    }
-    agent.config.providerOptions = Object.keys(ownOptions).length > 0 ? ownOptions : undefined;
-    this.touchUpdatedAt(agent);
-    this.emitState(agent);
+      if (agent.session.applyOptions) {
+        // Values the provider reports while applying (`options_changed`) land on top of the
+        // requested ones, so the provider's report wins. A rejection restores the record.
+        commit(ownOptions);
+        try {
+          await agent.session.applyOptions(this.effectiveOptionsFor(agent.provider, ownOptions));
+          await this.drainSessionEvents(agentId);
+        } catch (error) {
+          agent.config.providerOptions = previous;
+          throw error;
+        }
+      } else {
+        commit(ownOptions);
+      }
+      this.touchUpdatedAt(agent);
+      this.emitState(agent);
+    });
   }
 
   private effectiveOptionsFor(

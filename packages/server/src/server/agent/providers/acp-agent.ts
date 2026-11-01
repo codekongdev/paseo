@@ -2408,10 +2408,6 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   }
 
   async applyOptions(options: ProviderOptions): Promise<void> {
-    await this.setConfigFeature(
-      ACP_AUTO_ACCEPT_FEATURE_ID,
-      options[ACP_AUTO_ACCEPT_FEATURE_ID] === true,
-    );
     for (const featureOption of this.configFeatureOptions) {
       const explicit = Object.prototype.hasOwnProperty.call(options, featureOption.id);
       const value = explicit
@@ -2426,6 +2422,11 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       }
       await this.setConfigFeature(featureOption.id, value);
     }
+    // Last, so a rejected selection leaves permission handling as it was.
+    await this.setConfigFeature(
+      ACP_AUTO_ACCEPT_FEATURE_ID,
+      options[ACP_AUTO_ACCEPT_FEATURE_ID] === true,
+    );
   }
 
   private async setConfigFeature(featureId: string, value: unknown): Promise<void> {
