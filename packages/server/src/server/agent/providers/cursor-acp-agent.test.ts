@@ -397,6 +397,64 @@ describe("CursorACPAgentClient session start", () => {
     });
   });
 
+  test("a selection a model or thinking write changes replaces the stored option", async () => {
+    const reasoning = (currentValue: string): SessionConfigOption => ({
+      ...KIMI_K3_CONFIG_OPTIONS[0]!,
+      currentValue,
+    });
+    const session = createCursorSession(
+      { model: "composer-2.5", providerOptions: { [CURSOR_FAST_FEATURE_OPTION.id]: "true" } },
+      {
+        currentModelId: "composer-2.5",
+        configOptions: [reasoning("max"), fastConfigOption("true")],
+        // Changing the reasoning level also turns Fast off, with no separate notification.
+        setSessionConfigOption: async (request) => ({
+          configOptions: [
+            reasoning(request.value === "low" ? "low" : "max"),
+            fastConfigOption(request.value === "low" ? "false" : "true"),
+          ],
+        }),
+      },
+    );
+    await session.initializeNewSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    await session.setThinkingOption("low");
+
+    expect(events).toContainEqual({
+      type: "options_changed",
+      provider: "acp",
+      patch: { [CURSOR_FAST_FEATURE_OPTION.id]: "false" },
+    });
+  });
+
+  test("an option removed from the agent stays absent when the provider later selects it again", async () => {
+    const setSessionConfigOption = vi.fn(async (request: { value: string }) => ({
+      configOptions: [fastConfigOption(request.value === "true" ? "true" : "false")],
+    }));
+    const session = createCursorSession(
+      { model: "composer-2.5" },
+      {
+        currentModelId: "composer-2.5",
+        configOptions: [fastConfigOption("false")],
+        setSessionConfigOption,
+      },
+    );
+    await session.initializeNewSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    await session.applyOptions({ [CURSOR_FAST_FEATURE_OPTION.id]: "true" });
+    await session.applyOptions({});
+    await session.sessionUpdate({
+      sessionId: "session-1",
+      update: { sessionUpdate: "config_option_update", configOptions: [fastConfigOption("true")] },
+    });
+
+    expect(events.filter((event) => event.type === "options_changed")).toEqual([]);
+  });
+
   test("removing the Fast option returns the session to the value it started with", async () => {
     const setSessionConfigOption = vi.fn(async (request: { value: string }) => ({
       configOptions: [fastConfigOption(request.value === "true" ? "true" : "false")],

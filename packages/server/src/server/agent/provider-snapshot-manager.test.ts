@@ -1363,6 +1363,68 @@ describe("ProviderSnapshotManager public surface", () => {
     }
   });
 
+  test("resolveCreateConfig classifies a parent on its effective options", async () => {
+    const resolverInputs: ResolveAgentCreateConfigInput[] = [];
+    const manager = new ProviderSnapshotManager({
+      logger: createTestLogger(),
+      providerOverrides: {
+        copilot: { enabled: false },
+        opencode: { enabled: false },
+        pi: { enabled: false },
+      },
+      extraClients: {
+        codex: createExtraClient("codex", {
+          async isAvailable() {
+            return true;
+          },
+          async fetchCatalog() {
+            return { models: [] as AgentModelDefinition[], modes: [] };
+          },
+          resolveCreateConfig(input) {
+            resolverInputs.push(input);
+            return { modeId: undefined, providerOptions: undefined };
+          },
+        }),
+        claude: createExtraClient("claude", {
+          async isAvailable() {
+            return true;
+          },
+          async fetchCatalog() {
+            return { models: [] as AgentModelDefinition[], modes: [] };
+          },
+          isCreateConfigUnattended(input) {
+            return input.config.providerOptions?.auto_accept === true;
+          },
+        }),
+      },
+    });
+    try {
+      // The auto-accept comes from provider configuration, not from the agent's own options.
+      const parent: ManagedAgent = {
+        ...CLOSED_PARENT,
+        id: "parent-agent",
+        provider: "claude",
+        currentModeId: "default",
+        config: { provider: "claude", cwd: "/tmp/project" },
+        effectiveOptions: { auto_accept: true },
+      };
+
+      await manager.resolveCreateConfig({
+        cwd: "/tmp/project",
+        provider: "codex",
+        requestedMode: undefined,
+        providerOptions: undefined,
+        parent,
+        unattended: false,
+      });
+
+      expect(resolverInputs[0]).toMatchObject({ parent: { isUnattended: true }, unattended: true });
+      expect(parent.config.providerOptions).toBeUndefined();
+    } finally {
+      manager.destroy();
+    }
+  });
+
   test("resolveCreateConfig passes explicit unattended intent to provider policy", async () => {
     const resolverInputs: ResolveAgentCreateConfigInput[] = [];
     const modes: AgentMode[] = [{ id: "worker", label: "Worker", isUnattended: true }];

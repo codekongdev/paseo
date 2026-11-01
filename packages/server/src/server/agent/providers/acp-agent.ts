@@ -2209,6 +2209,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       requestedValue: modeId,
       label: "mode",
     });
+    for (const event of this.reportSelectionChanges()) this.pushEvent(event);
     this.availableModes = deriveModesFromACP(this.defaultModes, null, this.configOptions).modes;
     this.pushEvent({
       type: "mode_changed",
@@ -2334,6 +2335,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       requestedValue: modelId,
       label: "model",
     });
+    for (const event of this.reportSelectionChanges()) this.pushEvent(event);
     this.pushEvent({
       type: "model_changed",
       provider: this.provider,
@@ -2385,6 +2387,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       requestedValue: thinkingOptionId,
       label: "thought-level",
     });
+    for (const event of this.reportSelectionChanges()) this.pushEvent(event);
     this.pushEvent({
       type: "thinking_option_changed",
       provider: this.provider,
@@ -2429,6 +2432,8 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   }
 
   async applyOptions(options: ProviderOptions): Promise<void> {
+    // What the provider kept for each selection written here, which can differ from the request.
+    const acknowledged: Record<string, unknown> = {};
     for (const featureOption of this.configFeatureOptions) {
       const explicit = Object.prototype.hasOwnProperty.call(options, featureOption.id);
       const value = explicit
@@ -2442,12 +2447,20 @@ export class ACPAgentSession implements AgentSession, ACPClient {
         continue;
       }
       await this.setConfigFeature(featureOption.id, value);
+      acknowledged[featureOption.id] = this.config.providerOptions?.[featureOption.id];
     }
     // Last, so a rejected selection leaves permission handling as it was.
     await this.setConfigFeature(
       ACP_AUTO_ACCEPT_FEATURE_ID,
       options[ACP_AUTO_ACCEPT_FEATURE_ID] === true,
     );
+    // The session holds the options it was given, so a key the agent no longer has stays absent
+    // and a later provider report is not mistaken for a change to a stored override.
+    const next: ProviderOptions = { ...options };
+    for (const id of Object.keys(acknowledged)) {
+      if (Object.prototype.hasOwnProperty.call(options, id)) next[id] = acknowledged[id];
+    }
+    this.config.providerOptions = next;
   }
 
   private async setConfigFeature(featureId: string, value: unknown): Promise<void> {
