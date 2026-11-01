@@ -1096,9 +1096,14 @@ class PluginAgentClient implements AgentClient {
     persist: boolean;
   }): Promise<PluginAgentSession> {
     const sessionId = randomUUID();
+    // The plugin reports its own setting values once open, and those are what a later option
+    // removal returns to. So the session opens without setting overrides and applies them after.
     const bridge = await this.runtime.openSession({
       sessionId,
-      config: mapSessionConfig(input.config, input.launchContext, input.persist),
+      config: {
+        ...mapSessionConfig(input.config, input.launchContext, input.persist),
+        settings: {},
+      },
       persistence: input.persistence,
       history: input.history,
     });
@@ -1137,6 +1142,12 @@ class PluginAgentClient implements AgentClient {
       input.config.providerOptions ?? {},
     );
     bind(bridge);
+    try {
+      await session.applyOptions(input.config.providerOptions ?? {});
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
     return session;
   }
 
@@ -1213,8 +1224,6 @@ class PluginAgentSession implements AgentSession {
     closed: boolean;
   } | null = null;
   private replaying: Promise<void> | null = null;
-  /** The setting values the session last reported, to tell which ones a config event changed. */
-  private reportedSettings = new Map<string, JsonValue>();
   /** Each setting's value before Paseo first changed it, for an option that is later removed. */
   private startingSettings = new Map<string, JsonValue>();
 
@@ -1230,7 +1239,6 @@ class PluginAgentSession implements AgentSession {
     private heldOptions: ProviderOptions,
   ) {
     this.subagentIdsBySession.set(bridge.id, null);
-    this.reportedSettings = settingValues(bridge.config.settings);
     for (const event of bridge.history) this.accept(event, false);
     // Opening notices arrive before the manager subscribes to the session.
     // Commit them on registration and replay the same timestamps from history.
@@ -1529,24 +1537,29 @@ class PluginAgentSession implements AgentSession {
       this.history.push(next);
       if (live) this.emit(next);
     }
-    if (event.type !== "session.config") return;
-    // A setting the plugin changed on its own is an option change, so the stored option
+    if (!live || event.type !== "session.config") return;
+    // A setting that is not what the agent holds is an option change, so the stored option
     // follows what the plugin reports.
     const patch = this.changedSettings(event.config.settings);
-    if (live && patch) this.emit({ type: "options_changed", provider: this.provider, patch });
+    if (patch) this.emit({ type: "options_changed", provider: this.provider, patch });
   }
 
+  /**
+   * The settings whose reported value differs from the option the agent holds. A plugin that
+   * changed a setting on its own, or kept its previous value when asked for another, reports the
+   * value that is in effect.
+   */
   private changedSettings(settings: readonly ProviderSetting[]): Record<string, JsonValue> | null {
-    const next = settingValues(settings);
     const changed: Record<string, JsonValue> = {};
-    for (const [id, value] of next) {
+    for (const [id, value] of settingValues(settings)) {
       // Only a setting the agent holds an option for is reported; the others show through the
       // control's default.
       if (!Object.hasOwn(this.heldOptions, id)) continue;
-      if (this.reportedSettings.get(id) !== value) changed[id] = value;
+      if (this.heldOptions[id] !== value) changed[id] = value;
     }
-    this.reportedSettings = next;
-    return Object.keys(changed).length > 0 ? changed : null;
+    if (Object.keys(changed).length === 0) return null;
+    this.heldOptions = { ...this.heldOptions, ...changed };
+    return changed;
   }
 
   private translate(event: ProviderEvent): AgentStreamEvent[] {
@@ -1813,7 +1826,6 @@ class PluginAgentSession implements AgentSession {
     const bridge = await this.reopen(replay.persistence, replay.config);
     this.bridge = bridge;
     this.subagentIdsBySession.set(bridge.id, null);
-    this.reportedSettings = settingValues(bridge.config.settings);
     this.startingSettings.clear();
     for (const event of bridge.history) this.accept(event, false);
     this.unsubscribe = bridge.onEvent((event) => this.accept(event, true));

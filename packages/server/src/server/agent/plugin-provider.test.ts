@@ -876,6 +876,83 @@ function expectNestedChildren(events: AgentStreamEvent[]) {
   }
 }
 
+const VOICES = [
+  { label: "Direct", value: "direct" },
+  { label: "Soft", value: "soft" },
+];
+
+function voiceConfig(voice: string) {
+  return {
+    model: "plugin-model",
+    mode: "build",
+    models: [{ id: "plugin-model", label: "Plugin model" }],
+    modes: [{ id: "build", label: "Build" }],
+    thinkingOptions: [],
+    settings: [
+      { type: "select" as const, id: "voice", label: "Voice", value: voice, options: VOICES },
+    ],
+  };
+}
+
+/**
+ * A plugin whose `voice` setting defaults to "direct". With `acceptsVoice: false` it completes a
+ * configure request but keeps its voice.
+ */
+function startVoicePlugin(input: { acceptsVoice: boolean }) {
+  const harness = createProviderHarness({
+    async handleInput(request, emit) {
+      if (request.type === "session.open") {
+        emit({
+          type: "session.opened",
+          requestId: request.requestId,
+          sessionId: request.sessionId,
+          capabilities: CAPABILITIES,
+          restoration: "core",
+          persistence: { version: 1, data: { token: "root" } },
+          cwd: request.config.cwd,
+        });
+        emit({
+          type: "session.config",
+          sessionId: request.sessionId,
+          config: voiceConfig(String(request.config.settings?.voice ?? "direct")),
+        });
+        emit({ type: "session.ready", requestId: request.requestId, sessionId: request.sessionId });
+        return true;
+      }
+      if (request.type !== "session.configure") return false;
+      const requested = request.changes.settings?.voice;
+      emit({
+        type: "session.config",
+        sessionId: request.sessionId,
+        config: voiceConfig(
+          input.acceptsVoice && typeof requested === "string" ? requested : "direct",
+        ),
+      });
+      emit({ type: "request.completed", requestId: request.requestId });
+      return true;
+    },
+  });
+  const logger = createTestLogger();
+  const registry = new PluginAgentClientRegistry(logger);
+  registry.replace([harness.registration]);
+  const manager = new AgentManager({
+    logger,
+    clients: registry.clients(),
+    providerDefinitions: registry.definitions(),
+  });
+  return { harness, manager, registry };
+}
+
+function configuredSettings(harness: ReturnType<typeof createProviderHarness>) {
+  return harness.inputs.flatMap((input) =>
+    input.type === "session.configure" ? [input.changes.settings] : [],
+  );
+}
+
+function voiceFeature(payload: ReturnType<typeof toAgentPayload>) {
+  return payload.features?.find((feature) => feature.id === "voice");
+}
+
 describe("PluginAgentClientRegistry", () => {
   test("history keeps the tool's first position when completion follows later text", async () => {
     const harness = createProviderHarness();
@@ -1607,6 +1684,68 @@ describe("PluginAgentClientRegistry", () => {
       expect(payload.features?.find((feature) => feature.id === "voice")).toMatchObject({
         value: "direct",
       });
+    } finally {
+      await registry.shutdown();
+    }
+  });
+
+  test("removing an option the agent was created with returns the setting to the plugin's default", async () => {
+    const { harness, manager, registry } = startVoicePlugin({ acceptsVoice: true });
+    try {
+      const agent = await manager.createAgent(
+        { provider: harness.registration.id, cwd: tmpdir(), providerOptions: { voice: "soft" } },
+        undefined,
+        { workspaceId: undefined },
+      );
+      expect(toAgentPayload(manager.getAgent(agent.id)!).options).toEqual({ voice: "soft" });
+
+      await manager.setAgentOptions(agent.id, { voice: null });
+
+      expect(configuredSettings(harness)).toEqual([{ voice: "soft" }, { voice: "direct" }]);
+      const payload = toAgentPayload(manager.getAgent(agent.id)!);
+      expect(payload.options).toEqual({});
+      expect(voiceFeature(payload)).toMatchObject({ value: "direct" });
+    } finally {
+      await registry.shutdown();
+    }
+  });
+
+  test("removing an option a resumed agent held returns the setting to the plugin's default", async () => {
+    const { harness, registry } = startVoicePlugin({ acceptsVoice: true });
+    try {
+      const client = registry.clients()[harness.registration.id]!;
+      const first = await client.createSession({
+        provider: harness.registration.id,
+        cwd: tmpdir(),
+      });
+      const resumed = await client.resumeSession(first.describePersistence()!, {
+        cwd: tmpdir(),
+        providerOptions: { voice: "soft" },
+      });
+
+      await resumed.applyOptions!({});
+
+      expect(configuredSettings(harness)).toEqual([{ voice: "soft" }, { voice: "direct" }]);
+      await resumed.close();
+    } finally {
+      await registry.shutdown();
+    }
+  });
+
+  test("a selection the plugin keeps on its previous value replaces the requested option", async () => {
+    const { harness, manager, registry } = startVoicePlugin({ acceptsVoice: false });
+    try {
+      const agent = await manager.createAgent(
+        { provider: harness.registration.id, cwd: tmpdir(), providerOptions: { voice: "direct" } },
+        undefined,
+        { workspaceId: undefined },
+      );
+
+      await manager.setAgentOptions(agent.id, { voice: "soft" });
+
+      const payload = toAgentPayload(manager.getAgent(agent.id)!);
+      expect(payload.options).toEqual({ voice: "direct" });
+      expect(voiceFeature(payload)).toMatchObject({ value: "direct" });
     } finally {
       await registry.shutdown();
     }
