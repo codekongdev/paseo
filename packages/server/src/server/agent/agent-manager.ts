@@ -781,6 +781,8 @@ export class AgentManager {
   private readonly runtimeCleanupIdentities = new WeakMap<AgentSession, object>();
   private readonly collectingRuntimes = new Set<string>();
   private readonly lifecycleMutationTails = new Map<string, Promise<void>>();
+  /** Options a `setAgentOptions` call is applying, until the provider accepts or rejects them. */
+  private readonly pendingOptionCandidates = new Map<string, ProviderOptions>();
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
@@ -2280,26 +2282,23 @@ export class AgentManager {
     // overlapping patches to different keys would otherwise overwrite one another.
     await this.runLifecycleMutation(agentId, async () => {
       const agent = this.requireAgent(agentId);
-      const previous = agent.config.providerOptions;
-      const ownOptions = applyProviderOptionsPatch(previous, patch);
-      const commit = (options: ProviderOptions) => {
-        agent.config.providerOptions = Object.keys(options).length > 0 ? options : undefined;
-      };
+      let candidate = applyProviderOptionsPatch(agent.config.providerOptions, patch);
 
       if (agent.session.applyOptions) {
-        // Values the provider reports while applying (`options_changed`) land on top of the
-        // requested ones, so the provider's report wins. A rejection restores the record.
-        commit(ownOptions);
+        // The candidate stays out of the agent's record until the provider accepts it. Values
+        // the provider reports meanwhile (`options_changed`) are folded into the candidate, so
+        // a rejection leaves the record, its snapshots and its stored copy as they were.
+        this.pendingOptionCandidates.set(agentId, candidate);
         try {
-          await agent.session.applyOptions(this.effectiveOptionsFor(agent.provider, ownOptions));
+          await agent.session.applyOptions(this.effectiveOptionsFor(agent.provider, candidate));
+        } finally {
+          // Events the provider queued before answering must reach the candidate, not the record.
           await this.drainSessionEvents(agentId);
-        } catch (error) {
-          agent.config.providerOptions = previous;
-          throw error;
+          candidate = this.pendingOptionCandidates.get(agentId) ?? candidate;
+          this.pendingOptionCandidates.delete(agentId);
         }
-      } else {
-        commit(ownOptions);
       }
+      agent.config.providerOptions = Object.keys(candidate).length > 0 ? candidate : undefined;
       this.touchUpdatedAt(agent);
       this.emitState(agent);
     });
@@ -4707,9 +4706,14 @@ export class AgentManager {
     flags: StreamEventFlags;
   }): void {
     const { agent, patch, flags } = params;
+    flags.shouldDispatchEvent = false;
+    const candidate = this.pendingOptionCandidates.get(agent.id);
+    if (candidate) {
+      this.pendingOptionCandidates.set(agent.id, applyProviderOptionsPatch(candidate, patch));
+      return;
+    }
     const ownOptions = applyProviderOptionsPatch(agent.config.providerOptions, patch);
     agent.config.providerOptions = Object.keys(ownOptions).length > 0 ? ownOptions : undefined;
-    flags.shouldDispatchEvent = false;
     this.emitState(agent);
   }
 

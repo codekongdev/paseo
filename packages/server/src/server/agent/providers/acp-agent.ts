@@ -2407,6 +2407,27 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     }
   }
 
+  /**
+   * When the provider reports a different value for a select the agent holds an explicit option
+   * for, the stored option follows the report. Selections with no stored option are shown through
+   * the control's default instead.
+   */
+  private reportSelectionChanges(): AgentStreamEvent[] {
+    const patch: Record<string, string> = {};
+    for (const featureOption of this.configFeatureOptions) {
+      const stored = this.config.providerOptions?.[featureOption.id];
+      if (typeof stored !== "string") continue;
+      const current = findSelectConfigFeatureOption(
+        this.configOptions,
+        featureOption,
+      )?.currentValue;
+      if (current != null && current !== stored) patch[featureOption.id] = current;
+    }
+    if (Object.keys(patch).length === 0) return [];
+    this.config.providerOptions = { ...this.config.providerOptions, ...patch };
+    return [{ type: "options_changed", provider: this.provider, patch }];
+  }
+
   async applyOptions(options: ProviderOptions): Promise<void> {
     for (const featureOption of this.configFeatureOptions) {
       const explicit = Object.prototype.hasOwnProperty.call(options, featureOption.id);
@@ -2476,6 +2497,14 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       label: featureOption.label,
     });
     this.config.providerOptions = { ...this.config.providerOptions, [featureId]: currentValue };
+    if (currentValue !== requestedValue) {
+      // The provider kept a different selection than the one asked for.
+      this.pushEvent({
+        type: "options_changed",
+        provider: this.provider,
+        patch: { [featureId]: currentValue },
+      });
+    }
   }
 
   private applyConfigOptionResponse({
@@ -3317,6 +3346,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
         thinkingOptionId: this.thinkingOptionId,
       });
     }
+    events.push(...this.reportSelectionChanges());
     return events;
   }
 

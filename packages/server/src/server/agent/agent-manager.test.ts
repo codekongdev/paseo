@@ -12996,6 +12996,62 @@ describe("agent options", () => {
     });
   });
 
+  test("a rejected update that saw provider events leaves the record, snapshot and stored copy as they were", async () => {
+    class NoisySession extends OptionsSession {
+      override async applyOptions(): Promise<void> {
+        // The provider reports a change and a usage update, then refuses the request.
+        this.pushEvent({
+          type: "options_changed",
+          provider: this.provider,
+          patch: { voice: "soft" },
+        });
+        this.pushEvent({
+          type: "usage_updated",
+          provider: this.provider,
+          usage: { inputTokens: 1 },
+        });
+        throw new Error("refused");
+      }
+    }
+    class NoisyClient extends OptionsClient {
+      override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+        this.session = new NoisySession(config);
+        return this.session;
+      }
+    }
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-options-rejected-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const manager = new AgentManager({
+      clients: { codex: new NoisyClient() },
+      registry: storage,
+      logger,
+    });
+    const created = await manager.createAgent(
+      { provider: "codex", cwd: workdir, providerOptions: { voice: "direct" } },
+      undefined,
+      { workspaceId: undefined },
+    );
+    const published: Array<ProviderOptions | undefined> = [];
+    manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === created.id) {
+          published.push(event.agent.effectiveOptions);
+        }
+      },
+      { replayState: false },
+    );
+
+    await expect(manager.setAgentOptions(created.id, { voice: "soft" })).rejects.toThrow("refused");
+    await manager.flush();
+
+    expect(manager.getAgent(created.id)?.config.providerOptions).toEqual({ voice: "direct" });
+    expect(toAgentPayload(manager.getAgent(created.id)!).options).toMatchObject({
+      voice: "direct",
+    });
+    expect(published.every((options) => options?.voice === "direct")).toBe(true);
+    expect((await storage.get(created.id))?.config?.providerOptions).toEqual({ voice: "direct" });
+  });
+
   test("a metadata-only update of a stored agent reports its saved options and config defaults", async () => {
     class PlanSession extends OptionsSession {
       get controls(): AgentOptionControl[] {

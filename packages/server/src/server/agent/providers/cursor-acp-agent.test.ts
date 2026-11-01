@@ -6,7 +6,7 @@ import { describe, expect, test, vi } from "vitest";
 
 import { ACPAgentSession } from "./acp-agent.js";
 import type { SpawnedACPProcess, SessionStateResponse } from "./acp-agent.js";
-import type { AgentSessionConfig } from "../agent-sdk-types.js";
+import type { AgentSessionConfig, AgentStreamEvent } from "../agent-sdk-types.js";
 import { CURSOR_FAST_FEATURE_OPTION, CursorACPAgentClient } from "./cursor-acp-agent.js";
 import { GenericACPAgentClient } from "./generic-acp-agent.js";
 import { createTestLogger } from "../../../test-utils/test-logger.js";
@@ -371,6 +371,30 @@ describe("CursorACPAgentClient session start", () => {
       options: [{ optionId: "allow-always", name: "Always allow", kind: "allow_always" }],
     });
     await vi.waitFor(() => expect(session.getPendingPermissions()).toHaveLength(1));
+  });
+
+  test("a selection the provider changes on its own replaces the stored option", async () => {
+    const session = createCursorSession(
+      { model: "composer-2.5", providerOptions: { [CURSOR_FAST_FEATURE_OPTION.id]: "true" } },
+      {
+        currentModelId: "composer-2.5",
+        configOptions: [fastConfigOption("true")],
+      },
+    );
+    await session.initializeNewSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    await session.sessionUpdate({
+      sessionId: "session-1",
+      update: { sessionUpdate: "config_option_update", configOptions: [fastConfigOption("false")] },
+    });
+
+    expect(events).toContainEqual({
+      type: "options_changed",
+      provider: "acp",
+      patch: { [CURSOR_FAST_FEATURE_OPTION.id]: "false" },
+    });
   });
 
   test("removing the Fast option returns the session to the value it started with", async () => {
