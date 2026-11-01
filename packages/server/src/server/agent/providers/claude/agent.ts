@@ -2800,15 +2800,19 @@ class ClaudeAgentSession implements AgentSession {
   async applyOptions(options: ProviderOptions): Promise<void> {
     const providerOptions =
       validateProviderOptions("claude", ClaudeProviderOptionsSchema, options) ?? {};
-    if (providerOptions.fast_mode === true && !claudeModelSupportsFastMode(this.config.model)) {
+    const wantsFast = providerOptions.fast_mode === true;
+    const hadFast = this.config.providerOptions.fast_mode === true;
+    const modelSupportsFast = claudeModelSupportsFastMode(this.config.model);
+    if (wantsFast && !hadFast && !modelSupportsFast) {
       throw new Error(
         `Claude fast mode is not available for model '${this.config.model ?? "default"}'`,
       );
     }
-    const fastModeChanged =
-      (providerOptions.fast_mode === true) !== (this.config.providerOptions.fast_mode === true);
-    if (fastModeChanged) {
-      await this.query?.applyFlagSettings({ fastMode: providerOptions.fast_mode === true });
+    // A saved Fast preference stays dormant on a model without Fast (see `setModel`), so the
+    // runtime setting is the preference filtered by model support.
+    const runtimeFast = wantsFast && modelSupportsFast;
+    if (runtimeFast !== (hadFast && modelSupportsFast)) {
+      await this.query?.applyFlagSettings({ fastMode: runtimeFast });
       this.cachedRuntimeInfo = null;
     }
     // Held until the runtime accepts, so a rejected change is retried instead of skipped.

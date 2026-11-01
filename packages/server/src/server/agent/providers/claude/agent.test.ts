@@ -1532,6 +1532,38 @@ describe("ClaudeAgentSession features", () => {
     await session.close();
   });
 
+  test("an unrelated options patch is accepted after switching away from a Fast model", async () => {
+    const { queryFactory, queryMock } = createQueryMock();
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({
+      provider: "claude",
+      cwd: process.cwd(),
+      model: "claude-opus-4-8",
+    });
+    await session.setModel("claude-opus-4-8");
+    await session.applyOptions?.({ fast_mode: true });
+    await session.setModel("claude-sonnet-5");
+    queryMock.applyFlagSettings.mockClear();
+
+    // The manager sends the full record, which still holds the dormant Fast preference.
+    await expect(
+      session.applyOptions?.({ fast_mode: true, allowedTools: ["Read"] }),
+    ).resolves.toBeUndefined();
+    expect(queryMock.applyFlagSettings).not.toHaveBeenCalled();
+
+    // Turning Fast on for a model without it is still refused.
+    await expect(session.applyOptions?.({ allowedTools: ["Read"] })).resolves.toBeUndefined();
+    await expect(
+      session.applyOptions?.({ fast_mode: true, allowedTools: ["Read"] }),
+    ).rejects.toThrow("Claude fast mode is not available for model 'claude-sonnet-5'");
+
+    await session.close();
+  });
+
   test("fast mode survives a daemon restart through the stored providerOptions", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "claude-fast-restart-"));
     const storagePath = path.join(root, "agents");

@@ -1134,6 +1134,7 @@ class PluginAgentClient implements AgentClient {
         });
       },
       bind,
+      input.config.providerOptions ?? {},
     );
     bind(bridge);
     return session;
@@ -1214,6 +1215,8 @@ class PluginAgentSession implements AgentSession {
   private replaying: Promise<void> | null = null;
   /** The setting values the session last reported, to tell which ones a config event changed. */
   private reportedSettings = new Map<string, JsonValue>();
+  /** Each setting's value before Paseo first changed it, for an option that is later removed. */
+  private startingSettings = new Map<string, JsonValue>();
 
   constructor(
     readonly provider: string,
@@ -1224,6 +1227,7 @@ class PluginAgentSession implements AgentSession {
       state: ProviderConfigState,
     ) => Promise<ProviderRuntimeSession>,
     private readonly onBind: (bridge: ProviderRuntimeSession) => void,
+    private heldOptions: ProviderOptions,
   ) {
     this.subagentIdsBySession.set(bridge.id, null);
     this.reportedSettings = settingValues(bridge.config.settings);
@@ -1432,14 +1436,26 @@ class PluginAgentSession implements AgentSession {
   async applyOptions(options: ProviderOptions): Promise<void> {
     this.assertReplayComplete();
     const settings: Record<string, JsonValue> = {};
+    const startingValues = new Map<string, JsonValue>();
     for (const setting of this.bridge.config.settings) {
-      const value = options[setting.id];
-      if (value !== undefined && value !== setting.value) {
-        settings[setting.id] = toJsonValue(value, `setting '${setting.id}'`);
-      }
+      // An option removed from the agent returns the setting to the value it had before Paseo
+      // first changed it.
+      const value = options[setting.id] ?? this.startingSettings.get(setting.id);
+      if (value === undefined || value === setting.value) continue;
+      startingValues.set(setting.id, setting.value);
+      settings[setting.id] = toJsonValue(value, `setting '${setting.id}'`);
     }
-    if (Object.keys(settings).length > 0) {
-      await this.bridge.configure({ settings });
+    // Held before the request, because the plugin's config report arrives while it is pending.
+    const previous = this.heldOptions;
+    this.heldOptions = options;
+    try {
+      if (Object.keys(settings).length > 0) await this.bridge.configure({ settings });
+    } catch (error) {
+      this.heldOptions = previous;
+      throw error;
+    }
+    for (const [id, value] of startingValues) {
+      if (!this.startingSettings.has(id)) this.startingSettings.set(id, value);
     }
   }
 
@@ -1524,6 +1540,9 @@ class PluginAgentSession implements AgentSession {
     const next = settingValues(settings);
     const changed: Record<string, JsonValue> = {};
     for (const [id, value] of next) {
+      // Only a setting the agent holds an option for is reported; the others show through the
+      // control's default.
+      if (!Object.hasOwn(this.heldOptions, id)) continue;
       if (this.reportedSettings.get(id) !== value) changed[id] = value;
     }
     this.reportedSettings = next;
@@ -1795,6 +1814,7 @@ class PluginAgentSession implements AgentSession {
     this.bridge = bridge;
     this.subagentIdsBySession.set(bridge.id, null);
     this.reportedSettings = settingValues(bridge.config.settings);
+    this.startingSettings.clear();
     for (const event of bridge.history) this.accept(event, false);
     this.unsubscribe = bridge.onEvent((event) => this.accept(event, true));
     this.onBind(bridge);

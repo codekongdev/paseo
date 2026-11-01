@@ -1546,6 +1546,72 @@ describe("PluginAgentClientRegistry", () => {
     }
   });
 
+  test("removing an option returns the plugin's setting to the value it started with", async () => {
+    const voices = [
+      { label: "Direct", value: "direct" },
+      { label: "Soft", value: "soft" },
+    ];
+    const harness = createProviderHarness({
+      async handleInput(input, emit) {
+        if (input.type !== "session.configure") return false;
+        const voice = input.changes.settings?.voice ?? "direct";
+        emit({
+          type: "session.config",
+          sessionId: input.sessionId,
+          config: {
+            model: "plugin-model",
+            mode: "build",
+            models: [{ id: "plugin-model", label: "Plugin model" }],
+            modes: [{ id: "build", label: "Build" }],
+            thinkingOptions: [],
+            settings: [
+              {
+                type: "select",
+                id: "voice",
+                label: "Voice",
+                value: String(voice),
+                options: voices,
+              },
+            ],
+          },
+        });
+        emit({ type: "request.completed", requestId: input.requestId });
+        return true;
+      },
+    });
+    const logger = createTestLogger();
+    const registry = new PluginAgentClientRegistry(logger);
+    registry.replace([harness.registration]);
+    const manager = new AgentManager({
+      logger,
+      clients: registry.clients(),
+      providerDefinitions: registry.definitions(),
+    });
+    try {
+      const agent = await manager.createAgent(
+        { provider: harness.registration.id, cwd: tmpdir() },
+        undefined,
+        { workspaceId: undefined },
+      );
+      const configured = () =>
+        harness.inputs.flatMap((input) =>
+          input.type === "session.configure" ? [input.changes.settings] : [],
+        );
+
+      await manager.setAgentOptions(agent.id, { voice: "soft" });
+      await manager.setAgentOptions(agent.id, { voice: null });
+
+      expect(configured()).toEqual([{ voice: "soft" }, { voice: "direct" }]);
+      const payload = toAgentPayload(manager.getAgent(agent.id)!);
+      expect(payload.options).toEqual({});
+      expect(payload.features?.find((feature) => feature.id === "voice")).toMatchObject({
+        value: "direct",
+      });
+    } finally {
+      await registry.shutdown();
+    }
+  });
+
   test("adapts callback providers into the existing AgentClient and AgentSession path", async () => {
     const harness = createProviderHarness();
     const registry = new PluginAgentClientRegistry(createTestLogger());
